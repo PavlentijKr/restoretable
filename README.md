@@ -46,6 +46,7 @@ Each page is saved as `page-<n>.png` in the output directory.
 
 1. Convert PDF pages to images with `pdf2image`.
 2. Convert to grayscale and apply adaptive thresholding to isolate ink.
-3. Detect horizontal and vertical lines with morphology kernels sized relative to the page.
-4. Close gaps to restore missing cell borders and dilate to a consistent thickness.
-5. Overlay the cleaned grid onto the original image without altering text.
+3. Split the binary mask into horizontal and vertical candidates using oriented morphology kernels.
+4. Extract connected components as line segments, group them by alignment, and reconstruct continuous horizontal and vertical lines with averaged coordinates and unified extents.
+5. Detect missing grid rows/columns using the median spacing heuristic and synthesize intermediate lines.
+6. Draw the reconstructed full-length lines at a uniform thickness and overlay them on the original image without altering text.
