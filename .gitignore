@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+.venv
+venv/
+.Python
+*.swp
+.DS_Store
+output/
