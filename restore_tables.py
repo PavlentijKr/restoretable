@@ -97,6 +97,23 @@ class TableRestorer:
 
         return horizontal, vertical
 
+    def _compute_table_bounds(
+        self, horizontal: np.ndarray, vertical: np.ndarray, shape: Tuple[int, int]
+    ) -> Tuple[int, int, int, int]:
+        height, width = shape
+        union_mask = cv2.bitwise_or(horizontal, vertical)
+        points = cv2.findNonZero(union_mask)
+        if points is None:
+            return 0, 0, width - 1, height - 1
+
+        x, y, w, h = cv2.boundingRect(points)
+        padding = max(1, self.config.alignment_tolerance)
+        x_min = max(0, x - padding)
+        y_min = max(0, y - padding)
+        x_max = min(width - 1, x + w - 1 + padding)
+        y_max = min(height - 1, y + h - 1 + padding)
+        return x_min, y_min, x_max, y_max
+
     def _extract_segments(
         self, mask: np.ndarray, orientation: str, min_length: int
     ) -> List["LineSegment"]:
@@ -133,40 +150,61 @@ class TableRestorer:
         return groups
 
     def _build_lines_from_groups(
-        self, groups: Sequence[Sequence["LineSegment"]], orientation: str
+        self,
+        groups: Sequence[Sequence["LineSegment"]],
+        orientation: str,
+        bounds: Tuple[int, int, int, int],
     ) -> List["TableLine"]:
+        x_min, y_min, x_max, y_max = bounds
+
+        def clamp(value: int, low: int, high: int) -> int:
+            return max(low, min(value, high))
+
         lines: List[TableLine] = []
         for group in groups:
             if orientation == "horizontal":
                 y_coord = int(round(sum(seg.coordinate for seg in group) / len(group)))
-                x_min = min(seg.x_start for seg in group)
-                x_max = max(seg.x_end for seg in group)
-                lines.append(TableLine("horizontal", (x_min, y_coord), (x_max, y_coord)))
+                seg_x_min = max(min(seg.x_start for seg in group), x_min)
+                seg_x_max = min(max(seg.x_end for seg in group), x_max)
+                clamped_y = clamp(y_coord, y_min, y_max)
+                lines.append(
+                    TableLine(
+                        "horizontal",
+                        (seg_x_min, clamped_y),
+                        (seg_x_max, clamped_y),
+                    )
+                )
             else:
                 x_coord = int(round(sum(seg.coordinate for seg in group) / len(group)))
-                y_min = min(seg.y_start for seg in group)
-                y_max = max(seg.y_end for seg in group)
-                lines.append(TableLine("vertical", (x_coord, y_min), (x_coord, y_max)))
+                seg_y_min = max(min(seg.y_start for seg in group), y_min)
+                seg_y_max = min(max(seg.y_end for seg in group), y_max)
+                clamped_x = clamp(x_coord, x_min, x_max)
+                lines.append(
+                    TableLine(
+                        "vertical",
+                        (clamped_x, seg_y_min),
+                        (clamped_x, seg_y_max),
+                    )
+                )
         return lines
 
     def _fill_missing_lines(
-        self, lines: List["TableLine"], orientation: str, width: int, height: int
+        self,
+        lines: List["TableLine"],
+        orientation: str,
+        bounds: Tuple[int, int, int, int],
     ) -> List["TableLine"]:
         if len(lines) < 2:
             return lines
 
+        x_min, y_min, x_max, y_max = bounds
         sorted_lines = sorted(lines, key=lambda line: line.coordinate)
         if orientation == "horizontal":
-            global_start = min(line.start[0] for line in sorted_lines)
-            global_end = max(line.end[0] for line in sorted_lines)
+            global_start = x_min
+            global_end = x_max
         else:
-            global_start = min(line.start[1] for line in sorted_lines)
-            global_end = max(line.end[1] for line in sorted_lines)
-
-        if orientation == "horizontal" and global_start == global_end:
-            global_start, global_end = 0, width - 1
-        if orientation == "vertical" and global_start == global_end:
-            global_start, global_end = 0, height - 1
+            global_start = y_min
+            global_end = y_max
 
         changed = True
         while changed:
@@ -199,9 +237,13 @@ class TableRestorer:
     ) -> Tuple[List["TableLine"], List["TableLine"]]:
         horizontal_mask, vertical_mask = self._separate_orientations(binary)
         height, width = binary.shape
+        table_bounds = self._compute_table_bounds(horizontal_mask, vertical_mask, binary.shape)
 
-        horizontal_min_len = max(5, width // self.config.min_kernel_scale)
-        vertical_min_len = max(5, height // self.config.min_kernel_scale)
+        bound_width = table_bounds[2] - table_bounds[0] + 1
+        bound_height = table_bounds[3] - table_bounds[1] + 1
+
+        horizontal_min_len = max(5, bound_width // self.config.min_kernel_scale)
+        vertical_min_len = max(5, bound_height // self.config.min_kernel_scale)
 
         horizontal_segments = self._extract_segments(
             horizontal_mask, "horizontal", horizontal_min_len
@@ -212,11 +254,13 @@ class TableRestorer:
         horizontal_groups = self._group_segments(horizontal_segments, tolerance)
         vertical_groups = self._group_segments(vertical_segments, tolerance)
 
-        horizontal_lines = self._build_lines_from_groups(horizontal_groups, "horizontal")
-        vertical_lines = self._build_lines_from_groups(vertical_groups, "vertical")
+        horizontal_lines = self._build_lines_from_groups(
+            horizontal_groups, "horizontal", table_bounds
+        )
+        vertical_lines = self._build_lines_from_groups(vertical_groups, "vertical", table_bounds)
 
-        horizontal_lines = self._fill_missing_lines(horizontal_lines, "horizontal", width, height)
-        vertical_lines = self._fill_missing_lines(vertical_lines, "vertical", width, height)
+        horizontal_lines = self._fill_missing_lines(horizontal_lines, "horizontal", table_bounds)
+        vertical_lines = self._fill_missing_lines(vertical_lines, "vertical", table_bounds)
 
         return horizontal_lines, vertical_lines
 
