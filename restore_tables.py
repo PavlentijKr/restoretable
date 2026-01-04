@@ -22,6 +22,8 @@ class TableRestorationConfig:
     min_kernel_scale: int = 50
     gap_close_iterations: int = 2
     alignment_tolerance: int = 4
+    table_close_kernel: int = 5
+    min_table_area: int = 5000
     poppler_path: Optional[str] = None
 
     def horizontal_kernel(self, width: int) -> np.ndarray:
@@ -114,23 +116,68 @@ class TableRestorer:
         y_max = min(height - 1, y + h - 1 + padding)
         return x_min, y_min, x_max, y_max
 
+    def _detect_table_regions(
+        self, horizontal: np.ndarray, vertical: np.ndarray, shape: Tuple[int, int]
+    ) -> List[Tuple[int, int, int, int]]:
+        height, width = shape
+        union_mask = cv2.bitwise_or(horizontal, vertical)
+        close_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (self.config.table_close_kernel, self.config.table_close_kernel),
+        )
+        closed = cv2.morphologyEx(union_mask, cv2.MORPH_CLOSE, close_kernel)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        padding = max(1, self.config.alignment_tolerance)
+        regions: List[Tuple[int, int, int, int]] = []
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            if w * h < self.config.min_table_area:
+                continue
+            x_min = max(0, x - padding)
+            y_min = max(0, y - padding)
+            x_max = min(width - 1, x + w - 1 + padding)
+            y_max = min(height - 1, y + h - 1 + padding)
+            regions.append((x_min, y_min, x_max, y_max))
+
+        if not regions:
+            regions.append((0, 0, width - 1, height - 1))
+        return regions
+
     def _extract_segments(
-        self, mask: np.ndarray, orientation: str, min_length: int
+        self, mask: np.ndarray, orientation: str, min_length: int, offset: Tuple[int, int] = (0, 0)
     ) -> List["LineSegment"]:
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         segments: List[LineSegment] = []
+        x_offset, y_offset = offset
         for contour in contours:
             x, y, w, h = cv2.boundingRect(contour)
             if orientation == "horizontal":
                 if w < min_length or w < h:
                     continue
                 y_coord = y + h // 2
-                segments.append(LineSegment("horizontal", x, y_coord, x + w, y_coord))
+                segments.append(
+                    LineSegment(
+                        "horizontal",
+                        x + x_offset,
+                        y_coord + y_offset,
+                        x + w + x_offset,
+                        y_coord + y_offset,
+                    )
+                )
             else:
                 if h < min_length or h < w:
                     continue
                 x_coord = x + w // 2
-                segments.append(LineSegment("vertical", x_coord, y, x_coord, y + h))
+                segments.append(
+                    LineSegment(
+                        "vertical",
+                        x_coord + x_offset,
+                        y + y_offset,
+                        x_coord + x_offset,
+                        y + h + y_offset,
+                    )
+                )
         return segments
 
     def _group_segments(
@@ -237,32 +284,59 @@ class TableRestorer:
     ) -> Tuple[List["TableLine"], List["TableLine"]]:
         horizontal_mask, vertical_mask = self._separate_orientations(binary)
         height, width = binary.shape
-        table_bounds = self._compute_table_bounds(horizontal_mask, vertical_mask, binary.shape)
+        table_regions = self._detect_table_regions(horizontal_mask, vertical_mask, binary.shape)
 
-        bound_width = table_bounds[2] - table_bounds[0] + 1
-        bound_height = table_bounds[3] - table_bounds[1] + 1
+        all_horizontal: List[TableLine] = []
+        all_vertical: List[TableLine] = []
 
-        horizontal_min_len = max(5, bound_width // self.config.min_kernel_scale)
-        vertical_min_len = max(5, bound_height // self.config.min_kernel_scale)
+        for region in table_regions:
+            x_min, y_min, x_max, y_max = region
+            horizontal_roi = horizontal_mask[y_min : y_max + 1, x_min : x_max + 1]
+            vertical_roi = vertical_mask[y_min : y_max + 1, x_min : x_max + 1]
 
-        horizontal_segments = self._extract_segments(
-            horizontal_mask, "horizontal", horizontal_min_len
-        )
-        vertical_segments = self._extract_segments(vertical_mask, "vertical", vertical_min_len)
+            refined_bounds = self._compute_table_bounds(
+                horizontal_roi, vertical_roi, horizontal_roi.shape
+            )
+            table_bounds = (
+                refined_bounds[0] + x_min,
+                refined_bounds[1] + y_min,
+                refined_bounds[2] + x_min,
+                refined_bounds[3] + y_min,
+            )
 
-        tolerance = max(1, self.config.alignment_tolerance)
-        horizontal_groups = self._group_segments(horizontal_segments, tolerance)
-        vertical_groups = self._group_segments(vertical_segments, tolerance)
+            bound_width = table_bounds[2] - table_bounds[0] + 1
+            bound_height = table_bounds[3] - table_bounds[1] + 1
 
-        horizontal_lines = self._build_lines_from_groups(
-            horizontal_groups, "horizontal", table_bounds
-        )
-        vertical_lines = self._build_lines_from_groups(vertical_groups, "vertical", table_bounds)
+            horizontal_min_len = max(5, bound_width // self.config.min_kernel_scale)
+            vertical_min_len = max(5, bound_height // self.config.min_kernel_scale)
 
-        horizontal_lines = self._fill_missing_lines(horizontal_lines, "horizontal", table_bounds)
-        vertical_lines = self._fill_missing_lines(vertical_lines, "vertical", table_bounds)
+            horizontal_segments = self._extract_segments(
+                horizontal_roi, "horizontal", horizontal_min_len, offset=(x_min, y_min)
+            )
+            vertical_segments = self._extract_segments(
+                vertical_roi, "vertical", vertical_min_len, offset=(x_min, y_min)
+            )
 
-        return horizontal_lines, vertical_lines
+            tolerance = max(1, self.config.alignment_tolerance)
+            horizontal_groups = self._group_segments(horizontal_segments, tolerance)
+            vertical_groups = self._group_segments(vertical_segments, tolerance)
+
+            horizontal_lines = self._build_lines_from_groups(
+                horizontal_groups, "horizontal", table_bounds
+            )
+            vertical_lines = self._build_lines_from_groups(
+                vertical_groups, "vertical", table_bounds
+            )
+
+            horizontal_lines = self._fill_missing_lines(
+                horizontal_lines, "horizontal", table_bounds
+            )
+            vertical_lines = self._fill_missing_lines(vertical_lines, "vertical", table_bounds)
+
+            all_horizontal.extend(horizontal_lines)
+            all_vertical.extend(vertical_lines)
+
+        return all_horizontal, all_vertical
 
     def _draw_lines(
         self, horizontal_lines: Sequence["TableLine"], vertical_lines: Sequence["TableLine"], shape: Tuple[int, int]
