@@ -1,6 +1,6 @@
 # restoretable
 
-Utility for converting PDFs to PNG images and restoring table grids by thickening and reconnecting lines.
+Utility for converting PDFs to PNG images and restoring table grids by thickening and reconnecting lines. Includes a separate CPU-friendly multi-type table structure recognizer inspired by Multi-Type-TD-TSR.
 
 ## Setup
 
@@ -41,6 +41,26 @@ python restore_tables.py input.pdf --poppler-path /usr/local/opt/poppler/bin
 ```
 
 Each page is saved as `page-<n>.png` in the output directory.
+
+### Multi-Type table structure recognition (CPU-only)
+
+Detect table structure on a PDF and write JSON outputs to `./tsr_output`:
+
+```bash
+python multi_type_tsr.py input.pdf
+```
+
+Detect on a single image and save annotated cells:
+
+```bash
+python multi_type_tsr.py input.png --save-annotated
+```
+
+Use a custom output directory and Poppler path:
+
+```bash
+python multi_type_tsr.py input.pdf --output outputs --poppler-path /usr/local/opt/poppler/bin
+```
 
 ## How it works
 
